@@ -1,4 +1,4 @@
-module github.com/micahjmartin/enkodo
+module github.com/nullmonk/enkodo
 
 go 1.18
 

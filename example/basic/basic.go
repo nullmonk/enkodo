@@ -1,10 +1,12 @@
 package main
 
+//go:generate go run github.com/nullmonk/enkodo/cmd/enkodo .
+
 import (
 	"bytes"
 	"log"
 
-	"github.com/micahjmartin/enkodo"
+	"github.com/nullmonk/enkodo"
 )
 
 func main() {
@@ -38,11 +40,10 @@ func main() {
 
 type SocialMedia string
 
-// User holds the basic information for a user
 type User struct {
 	Email   string      `enkodo:""`
 	Age     uint8       `enkodo:""`
-	Twitter SocialMedia `enkodo:"string"`
+	Twitter SocialMedia `enkodo:"string"` // Manually specify type as string for enkodo
 }
 
 type Post struct {

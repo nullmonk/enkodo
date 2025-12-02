@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -15,7 +16,7 @@ import (
 	"unicode"
 )
 
-const packageName = "github.com/micahjmartin/enkodo"
+const packageName = "github.com/nullmonk/enkodo"
 
 var tag = regexp.MustCompile("enkodo:\"(\\w+)\"")
 
@@ -193,8 +194,11 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 	return nil
 }
 
-/* Each var that is appended to an array needs to be intialized, and have a unique name per type.
-This function determines how to handle that properly */
+/*
+	Each var that is appended to an array needs to be intialized, and have a unique name per type.
+
+This function determines how to handle that properly
+*/
 func initType(typ string) (init string, name string) {
 	clean_typ := strings.Trim(typ, "[]")
 	name = "_" + strings.ToLower(strings.TrimLeft(clean_typ, "*"))
@@ -305,7 +309,7 @@ func objectsInFile(file string) error {
 		out = os.Stdout
 	} else {
 		filename := file[:len(file)-len(filepath.Ext(file))] + "_enkodo.go"
-		fmt.Printf("Found %d structs in %s, saving to %s\n", len(structs), file, filename)
+		fmt.Printf("Found %d enkodo structs in %s, saving to %s\n", len(structs), file, filename)
 		oFile, err := os.Create(filename)
 		if err != nil {
 			return err
@@ -324,7 +328,37 @@ func objectsInFile(file string) error {
 }
 
 func main() {
-	opath := os.Args[1]
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s <path> [ - ]\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "Generate enkodo marshal/unmarshal functions for Go source files under the given path.")
+		fmt.Fprintln(os.Stderr, "If the optional second positional argument is '-', generated files are written to stdout.")
+		fmt.Fprintln(os.Stderr, "\nExamples:")
+		fmt.Fprintf(os.Stderr, "  %s ./pkg\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s ./example/basic\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+
+	help := flag.Bool("help", false, "Show help")
+	flag.Parse()
+
+	// also accept GNU-style --help
+	for _, a := range os.Args[1:] {
+		if a == "--help" {
+			*help = true
+			break
+		}
+	}
+	if *help {
+		flag.Usage()
+		os.Exit(0)
+	}
+
+	opath := flag.Arg(0)
+	if opath == "" {
+		flag.Usage()
+		log.Fatal("No input path given")
+	}
+
 	files := make([]string, 0, 10)
 
 	filepath.WalkDir(opath, func(path string, d fs.DirEntry, err error) error {
@@ -337,7 +371,6 @@ func main() {
 	if len(files) == 0 {
 		log.Fatal("No input files given")
 	}
-	fmt.Println(files)
 	for _, file := range files {
 		objectsInFile(file)
 	}
