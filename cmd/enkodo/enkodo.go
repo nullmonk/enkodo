@@ -18,34 +18,115 @@ import (
 
 const packageName = "github.com/nullmonk/enkodo"
 
+// Used to find enkodo tags in the struct fields
 var tag = regexp.MustCompile("enkodo:\"(\\w+)\"")
 
-var enc_types = map[string]string{
-	"uint":    "Uint",
-	"uint8":   "Uint8",
-	"uint16":  "Uint16",
-	"uint32":  "Uint32",
-	"uint64":  "Uint64",
-	"int":     "Int",
-	"int8":    "Int8",
-	"int16":   "Int16",
-	"int32":   "Int32",
-	"int64":   "Int64",
-	"float32": "Float32",
-	"float64": "Float64",
-	"string":  "String",
-	"[]byte":  "Bytes",
-	"bool":    "Bool",
+// This is all the types we know about. If you need more, make a new TypeConverter.
+// See Error type converter as an example
+var enc_types_advanced = map[string]TypeConverter{
+	"uint":    NewBasicTypeConverter("uint", "Uint"),
+	"uint8":   NewBasicTypeConverter("uint8", "Uint8"),
+	"uint16":  NewBasicTypeConverter("uint16", "Uint16"),
+	"uint32":  NewBasicTypeConverter("uint32", "Uint32"),
+	"uint64":  NewBasicTypeConverter("uint64", "Uint64"),
+	"int":     NewBasicTypeConverter("int", "Int"),
+	"int8":    NewBasicTypeConverter("int8", "Int8"),
+	"int16":   NewBasicTypeConverter("int16", "Int16"),
+	"int32":   NewBasicTypeConverter("int32", "Int32"),
+	"int64":   NewBasicTypeConverter("int64", "Int64"),
+	"float32": NewBasicTypeConverter("float32", "Float32"),
+	"float64": NewBasicTypeConverter("float64", "Float64"),
+	"string":  NewBasicTypeConverter("string", "String"),
+	"bool":    NewBasicTypeConverter("bool", "Bool"),
+	"[]byte":  NewBasicTypeConverter("[]byte", "Bytes"),
+	"error":   &ErrorTypeConverter{},
 }
 
 const ident = "\t"
 
+type TypeConverter interface {
+	// Name of the golang type for this converter
+	Name() string
+	// Name of the enkodo function used to encode it.
+	EnkodoFunction() string
+	// Take the value (e.g. struct.field) and return and modifications
+	// (e.g. struct.field.String()) to get passed to EnkodoFunction.
+	// must match the INPUT type of the EnkodoFunction
+	Enc(val string) string
+	// This code take a value v (output from EnkodoFunction) and converts it to Name()
+	//
+	// return nothing to just use the raw value of EnkodoFunc (e.g. Name = "string"
+	// and EnkodoFunc = "enkodo.String()")
+	//
+	// val, _ = enkodo.String()
+	// struct.Field = CustomType(val)
+	Dec(val string) string
+	// These packages must be imported to use this advanced type, ensure are included at the top
+	Imports() []string
+}
+
+type ErrorTypeConverter struct{}
+
+func (e *ErrorTypeConverter) Name() string {
+	return "error"
+}
+
+func (e *ErrorTypeConverter) EnkodoFunction() string {
+	return "String"
+}
+
+func (e *ErrorTypeConverter) Enc(val string) string {
+	return fmt.Sprintf("%s.Error()", val)
+}
+
+func (e *ErrorTypeConverter) Dec(val string) string {
+	return fmt.Sprintf("errors.New(%s)", val)
+}
+
+func (e *ErrorTypeConverter) Imports() []string {
+	return []string{"errors"}
+}
+
+type BasicTypeConverter struct {
+	goName  string
+	enkFunc string
+}
+
+func NewBasicTypeConverter(gotype, enkodoFunction string) *BasicTypeConverter {
+	return &BasicTypeConverter{
+		goName:  gotype,
+		enkFunc: enkodoFunction,
+	}
+}
+
+func (b *BasicTypeConverter) Name() string {
+	return b.goName
+}
+
+func (b *BasicTypeConverter) EnkodoFunction() string {
+	return b.enkFunc
+}
+
+func (b *BasicTypeConverter) Enc(val string) string {
+	return val // Use as is
+}
+
+func (b *BasicTypeConverter) Dec(val string) string {
+	return "" // Not mods needed, assumes enkFunc returns goName
+}
+
+func (b *BasicTypeConverter) Imports() []string {
+	return nil // Does not need to import anything
+}
+
+// A field on a struct, has a field name, go type, and optional override type
 type Field struct {
 	Name         string
 	Type         string
 	OverrideType string
 }
 
+// A struct has a name, and lots of fields
 type Struct struct {
 	Name   string
 	Fields []Field
@@ -94,8 +175,9 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 		return
 	}
 
-	if result, ok := enc_types[field.Type]; ok {
-		fmt.Fprintf(f, "%senc.%s(%s)\n", dent, result, name)
+	// Get the TypeConverter for this field type
+	if conv, ok := enc_types_advanced[field.Type]; ok {
+		fmt.Fprintf(f, "%senc.%s(%s)\n", dent, conv.EnkodoFunction(), conv.Enc(name))
 		return
 	}
 
@@ -123,12 +205,13 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err error) {
 	dent := strings.Repeat(ident, identCount)
 	name := field.Name
-	var ogType string
-	if field.OverrideType != "" {
-		ogType = field.Type
-		field.Type = field.OverrideType
-	}
-
+	/*
+		var ogType string
+		if field.OverrideType != "" {
+			ogType = field.Type
+			field.Type = field.OverrideType
+		}
+	*/
 	if field.Type == "" || field.Type[0] == '[' && len(field.Type) == 2 {
 		fmt.Fprintf(f, "%s// Do not know what to do with %s (%s)\n", dent, field.Name, field.Type)
 		return
@@ -142,21 +225,44 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 	}
 
 	// These basic functions are all error wrapped
-	if result, ok := enc_types[field.Type]; ok {
-		// Special case for overrides where we assign it to a different value, then set it in the obj
-		init, varName := initType(field.Type)
-		if field.OverrideType != "" {
-			if _, ok := s._declared[varName]; !ok {
-				s._declared[varName] = field.Type
-				fmt.Fprintf(f, "%s%s\n", dent, init)
-			}
+	typ := field.Type
+	if field.OverrideType != "" {
+		typ = field.OverrideType
+	}
 
-			fmt.Fprintf(f, "%sif %s, err = dec.%s(); err != nil {\n", dent, varName, result)
-			fmt.Fprintf(f, "%sreturn\n%s}\n", dent+ident, dent)
-			fmt.Fprintf(f, "%s%s = %s(%s)\n", dent, name, ogType, varName)
+	if conv, ok := enc_types_advanced[typ]; ok {
+		// Special case for overrides where we assign it to a different value, then set it in the obj
+		//init, varName := initType(field.Type)
+		//enhanced decoding where its converted
+		d := conv.Dec("v")
+		// Override requires a typecast back to the original gotype
+		if field.OverrideType != "" {
+			if d == "" {
+				d = "v"
+			}
+			d = fmt.Sprintf("%s(%s)", field.Type, d)
+		}
+		if d != "" {
+			/* Should come out like this:
+			// assume .Field error
+			if v, err := dec.String(); err == nil {
+				struct.Field = errors.New(v)
+			} else {
+				return err
+			}
+			*/
+
+			fmt.Fprintf(f, "%sif v, err := dec.%s(); err == nil {\n", dent, conv.EnkodoFunction())
+			fmt.Fprintf(f, "%s%s = %s\n", dent+ident, field.Name, d)
+			fmt.Fprintf(f, "%s} else {\n", dent)
+			fmt.Fprintf(f, "%sreturn err\n", dent+ident)
+			fmt.Fprintf(f, "%s}\n", dent)
+			//fmt.Fprintf(f, "%s%s = %s(%s)\n", dent, name, ogType, varName)
 		} else {
-			fmt.Fprintf(f, "%sif %s, err = dec.%s(); err != nil {\n", dent, name, result)
-			fmt.Fprintf(f, "%sreturn\n%s}\n", dent+ident, dent)
+
+			fmt.Fprintf(f, "%sif %s, err = dec.%s(); err != nil {\n", dent, field.Name, conv.EnkodoFunction())
+			fmt.Fprintf(f, "%sreturn err\n", dent+ident)
+			fmt.Fprintf(f, "%s}\n", dent)
 		}
 		return
 	}
@@ -178,13 +284,15 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 		}
 		// temp var for the type
 		init, temp := initType(field.Type)
-		fmt.Fprintf(f, "%s%s\n", dent, init)
 		// Read the len
 		s.DecodeField(identCount, Field{"_arrLen", "int", ""}, f)
 		// Make the buffer
 		fmt.Fprintf(f, "%s%s = make(%s, 0, _arrLen)\n", dent, name, field.Type)
 		fmt.Fprintf(f, "%sfor i := 0; i < _arrLen; i++ {\n", dent)
+		fmt.Fprintf(f, "%s%s\n", dent+ident, init)
 
+		// This initType makes a var per type in a loop, its technically not needed as we
+		// could use a temp var, but
 		if err := s.DecodeField(identCount+1, Field{temp, field.Type[2:], ""}, f); err != nil {
 			return err
 		}
@@ -201,7 +309,8 @@ This function determines how to handle that properly
 */
 func initType(typ string) (init string, name string) {
 	clean_typ := strings.Trim(typ, "[]")
-	name = "_" + strings.ToLower(strings.TrimLeft(clean_typ, "*"))
+	name = "t"
+	//name = "_" + strings.ToLower(strings.TrimLeft(clean_typ, "*"))
 	if typ[0] == '*' {
 		init = fmt.Sprintf("var %s = new(%s)", name, clean_typ)
 	} else {
@@ -318,8 +427,32 @@ func objectsInFile(file string) error {
 		out = oFile
 	}
 
+	// By default we import enkodo
+	imports := map[string]interface{}{
+		packageName: true,
+	}
+	// Check all the types that we will convert and see if they need to import anything
+	for _, struc := range structs {
+		for _, field := range struc.Fields {
+			ty := field.Type
+			if field.OverrideType != "" {
+				ty = field.OverrideType
+			}
+			if conv, ok := enc_types_advanced[ty]; ok {
+				for _, impt := range conv.Imports() {
+					imports[impt] = true
+				}
+			}
+		}
+	}
+
 	fmt.Fprint(out, "/* This file is auto-generated by enkodo */\n")
-	fmt.Fprintf(out, "package %s\n\nimport \"%s\"\n\n", pkg, packageName)
+	fmt.Fprintf(out, "package %s\n\n", pkg)
+	for i := range imports {
+		fmt.Fprintf(out, "import \"%s\"\n", i)
+	}
+	fmt.Fprintln(out, "")
+
 	for _, st := range structs {
 		st.EncodeFunc(out)
 		st.DecodeFunc(out)

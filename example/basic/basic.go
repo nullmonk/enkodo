@@ -44,6 +44,7 @@ type User struct {
 	Email   string      `enkodo:""`
 	Age     uint8       `enkodo:""`
 	Twitter SocialMedia `enkodo:"string"` // Manually specify type as string for enkodo
+	Bad     error       `enkodo:""`
 }
 
 type Post struct {
