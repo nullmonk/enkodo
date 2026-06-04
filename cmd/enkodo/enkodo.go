@@ -194,7 +194,15 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 
 	// Handle pointers to other types
 	if field.Type[0] == '*' {
-		fmt.Fprintf(f, "%senc.Encode(%s)\n", dent, name)
+		val := name
+		if field.EncodeFunc != "" {
+			if strings.HasPrefix(field.EncodeFunc, ".") {
+				val = rawName + field.EncodeFunc
+			} else {
+				val = fmt.Sprintf("%s(%s)", field.EncodeFunc, rawName)
+			}
+		}
+		fmt.Fprintf(f, "%senc.Encode(%s)\n", dent, val)
 		return
 	}
 
@@ -398,14 +406,18 @@ func GetStructFields(obj *ast.Object) *Struct {
 		match := tag.FindStringSubmatch(field.Tag.Value)
 		if len(match) > 1 {
 			parts := strings.Split(match[1], ",")
-			if len(parts) > 0 && parts[0] != "" {
-				f.OverrideType = parts[0]
-			}
-			if len(parts) > 1 && parts[1] != "" {
-				f.EncodeFunc = parts[1]
-			}
-			if len(parts) > 2 && parts[2] != "" {
-				f.DecodeFunc = parts[2]
+			if len(parts) == 1 && strings.HasPrefix(parts[0], ".") {
+				f.EncodeFunc = parts[0]
+			} else {
+				if len(parts) > 0 && parts[0] != "" {
+					f.OverrideType = parts[0]
+				}
+				if len(parts) > 1 && parts[1] != "" {
+					f.EncodeFunc = parts[1]
+				}
+				if len(parts) > 2 && parts[2] != "" {
+					f.DecodeFunc = parts[2]
+				}
 			}
 		}
 		if !unicode.IsUpper(rune(f.Name[0])) {

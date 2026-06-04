@@ -63,3 +63,14 @@ type User struct {
     Parent *CustomObj `enkodo:"string,.GetName(),.SetName"`
 }
 ```
+
+#### Shorthand
+If you only need a custom encode method, you can use the shorthand:
+
+```go
+type User struct {
+    // Calls u.Parent.GetName() for encoding, and uses default decoding for pointers
+    // NOTE: GetName() must return a type that implements MarshalEnkodo
+    Parent *CustomObj `enkodo:".GetName()"`
+}
+```
