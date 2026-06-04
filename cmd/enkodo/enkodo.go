@@ -19,7 +19,7 @@ import (
 const packageName = "github.com/nullmonk/enkodo"
 
 // Used to find enkodo tags in the struct fields
-var tag = regexp.MustCompile("enkodo:\"(\\w+)\"")
+var tag = regexp.MustCompile(`enkodo:"([^"]*)"`)
 
 // This is all the types we know about. If you need more, make a new TypeConverter.
 // See Error type converter as an example
@@ -124,6 +124,8 @@ type Field struct {
 	Name         string
 	Type         string
 	OverrideType string
+	EncodeFunc   string
+	DecodeFunc   string
 }
 
 // A struct has a name, and lots of fields
@@ -165,6 +167,7 @@ func (s *Struct) DecodeFunc(f io.Writer) error {
 func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err error) {
 	dent := strings.Repeat(ident, identCount)
 	name := field.Name
+	rawName := field.Name
 	if field.OverrideType != "" {
 		name = fmt.Sprintf("%s(%s)", field.OverrideType, field.Name)
 		field.Type = field.OverrideType
@@ -177,13 +180,29 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 
 	// Get the TypeConverter for this field type
 	if conv, ok := enc_types_advanced[field.Type]; ok {
-		fmt.Fprintf(f, "%senc.%s(%s)\n", dent, conv.EnkodoFunction(), conv.Enc(name))
+		val := conv.Enc(name)
+		if field.EncodeFunc != "" {
+			if strings.HasPrefix(field.EncodeFunc, ".") {
+				val = rawName + field.EncodeFunc
+			} else {
+				val = fmt.Sprintf("%s(%s)", field.EncodeFunc, rawName)
+			}
+		}
+		fmt.Fprintf(f, "%senc.%s(%s)\n", dent, conv.EnkodoFunction(), val)
 		return
 	}
 
 	// Handle pointers to other types
 	if field.Type[0] == '*' {
-		fmt.Fprintf(f, "%senc.Encode(%s)\n", dent, name)
+		val := name
+		if field.EncodeFunc != "" {
+			if strings.HasPrefix(field.EncodeFunc, ".") {
+				val = rawName + field.EncodeFunc
+			} else {
+				val = fmt.Sprintf("%s(%s)", field.EncodeFunc, rawName)
+			}
+		}
+		fmt.Fprintf(f, "%senc.Encode(%s)\n", dent, val)
 		return
 	}
 
@@ -191,7 +210,7 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 	if field.Type[0] == '[' {
 		fmt.Fprintf(f, "%senc.Int(len(%s))\n", dent, name)
 		fmt.Fprintf(f, "%sfor _, v := range %s {\n", dent, name)
-		if err := s.EncodeField(identCount+1, Field{Name: "v", Type: field.Type[2:]}, f); err != nil {
+		if err := s.EncodeField(identCount+1, Field{Name: "v", Type: field.Type[2:], OverrideType: "", EncodeFunc: "", DecodeFunc: ""}, f); err != nil {
 			return err
 		}
 		fmt.Fprintln(f, dent+"}")
@@ -235,13 +254,21 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 		//init, varName := initType(field.Type)
 		//enhanced decoding where its converted
 		d := conv.Dec("v")
-		// Override requires a typecast back to the original gotype
-		if field.OverrideType != "" {
+
+		if field.DecodeFunc != "" {
+			if strings.HasPrefix(field.DecodeFunc, ".") {
+				d = fmt.Sprintf("%s%s(v)", field.Name, field.DecodeFunc)
+			} else {
+				d = fmt.Sprintf("%s(v)", field.DecodeFunc)
+			}
+		} else if field.OverrideType != "" {
+			// Override requires a typecast back to the original gotype
 			if d == "" {
 				d = "v"
 			}
 			d = fmt.Sprintf("%s(%s)", field.Type, d)
 		}
+
 		if d != "" {
 			/* Should come out like this:
 			// assume .Field error
@@ -253,7 +280,11 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 			*/
 
 			fmt.Fprintf(f, "%sif v, err := dec.%s(); err == nil {\n", dent, conv.EnkodoFunction())
-			fmt.Fprintf(f, "%s%s = %s\n", dent+ident, field.Name, d)
+			if field.DecodeFunc != "" && strings.HasPrefix(field.DecodeFunc, ".") {
+				fmt.Fprintf(f, "%s%s\n", dent+ident, d)
+			} else {
+				fmt.Fprintf(f, "%s%s = %s\n", dent+ident, field.Name, d)
+			}
 			fmt.Fprintf(f, "%s} else {\n", dent)
 			fmt.Fprintf(f, "%sreturn err\n", dent+ident)
 			fmt.Fprintf(f, "%s}\n", dent)
@@ -285,7 +316,7 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 		// temp var for the type
 		init, temp := initType(field.Type)
 		// Read the len
-		s.DecodeField(identCount, Field{"_arrLen", "int", ""}, f)
+		s.DecodeField(identCount, Field{Name: "_arrLen", Type: "int", OverrideType: "", EncodeFunc: "", DecodeFunc: ""}, f)
 		// Make the buffer
 		fmt.Fprintf(f, "%s%s = make(%s, 0, _arrLen)\n", dent, name, field.Type)
 		fmt.Fprintf(f, "%sfor i := 0; i < _arrLen; i++ {\n", dent)
@@ -293,7 +324,7 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 
 		// This initType makes a var per type in a loop, its technically not needed as we
 		// could use a temp var, but
-		if err := s.DecodeField(identCount+1, Field{temp, field.Type[2:], ""}, f); err != nil {
+		if err := s.DecodeField(identCount+1, Field{Name: temp, Type: field.Type[2:], OverrideType: "", EncodeFunc: "", DecodeFunc: ""}, f); err != nil {
 			return err
 		}
 		fmt.Fprintf(f, "%s%s = append(%s, %s)\n", dent+ident, name, name, temp)
@@ -373,10 +404,23 @@ func GetStructFields(obj *ast.Object) *Struct {
 			continue
 		}
 		match := tag.FindStringSubmatch(field.Tag.Value)
-		if len(match) > 1 && len(match[1]) > 1 {
-			f.OverrideType = match[1]
+		if len(match) > 1 {
+			parts := strings.Split(match[1], ",")
+			if len(parts) == 1 && strings.HasPrefix(parts[0], ".") {
+				f.EncodeFunc = parts[0]
+			} else {
+				if len(parts) > 0 && parts[0] != "" {
+					f.OverrideType = parts[0]
+				}
+				if len(parts) > 1 && parts[1] != "" {
+					f.EncodeFunc = parts[1]
+				}
+				if len(parts) > 2 && parts[2] != "" {
+					f.DecodeFunc = parts[2]
+				}
+			}
 		}
-		if !unicode.IsUpper(rune(f.Name[0])) || (f.Type == "" && f.OverrideType == "") {
+		if !unicode.IsUpper(rune(f.Name[0])) {
 			// Only handle exported variables for now
 			continue
 		}
