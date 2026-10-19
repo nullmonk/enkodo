@@ -20,6 +20,12 @@ const packageName = "github.com/nullmonk/enkodo"
 
 // Used to find enkodo tags in the struct fields
 var tag = regexp.MustCompile(`enkodo:"([^"]*)"`)
+var (
+	exitFunc    = os.Exit
+	currentFile string
+	currentPos  token.Pos
+	currentFset *token.FileSet
+)
 
 // This is all the types we know about. If you need more, make a new TypeConverter.
 // See Error type converter as an example
@@ -36,10 +42,12 @@ var enc_types_advanced = map[string]TypeConverter{
 	"int64":   NewBasicTypeConverter("int64", "Int64"),
 	"float32": NewBasicTypeConverter("float32", "Float32"),
 	"float64": NewBasicTypeConverter("float64", "Float64"),
-	"string":  NewBasicTypeConverter("string", "String"),
-	"bool":    NewBasicTypeConverter("bool", "Bool"),
-	"[]byte":  NewBasicTypeConverter("[]byte", "Bytes"),
-	"error":   &ErrorTypeConverter{},
+	"string":    NewBasicTypeConverter("string", "String"),
+	"bool":      NewBasicTypeConverter("bool", "Bool"),
+	"[]byte":    NewBasicTypeConverter("[]byte", "Bytes"),
+	"error":     &ErrorTypeConverter{},
+	"Time":      &TimeTypeConverter{},
+	"time.Time": &TimeTypeConverter{},
 }
 
 const ident = "\t"
@@ -87,6 +95,28 @@ func (e *ErrorTypeConverter) Imports() []string {
 	return []string{"errors"}
 }
 
+type TimeTypeConverter struct{}
+
+func (t *TimeTypeConverter) Name() string {
+	return "time.Time"
+}
+
+func (t *TimeTypeConverter) EnkodoFunction() string {
+	return "Int64"
+}
+
+func (t *TimeTypeConverter) Enc(val string) string {
+	return fmt.Sprintf("%s.UnixNano()", val)
+}
+
+func (t *TimeTypeConverter) Dec(val string) string {
+	return fmt.Sprintf("time.Unix(0, %s)", val)
+}
+
+func (t *TimeTypeConverter) Imports() []string {
+	return []string{"time"}
+}
+
 type BasicTypeConverter struct {
 	goName  string
 	enkFunc string
@@ -126,12 +156,14 @@ type Field struct {
 	OverrideType string
 	EncodeFunc   string
 	DecodeFunc   string
+	Pos          token.Pos
 }
 
 // A struct has a name, and lots of fields
 type Struct struct {
 	Name   string
 	Fields []Field
+	Pos    token.Pos
 
 	_declared   map[string]string
 	_hasLoopVar bool
@@ -142,10 +174,16 @@ func (s *Struct) String() string {
 }
 
 func (s *Struct) EncodeFunc(f io.Writer) error {
+	if s.Pos.IsValid() {
+		currentPos = s.Pos
+	}
 	s._declared = make(map[string]string)
 	fnRef := strings.ToLower(s.Name[0:1])
 	fmt.Fprintf(f, "func (%s *%s) MarshalEnkodo(enc *enkodo.Encoder) (err error) {\n", fnRef, s.Name)
 	for _, field := range s.Fields {
+		if field.Pos.IsValid() {
+			currentPos = field.Pos
+		}
 		field.Name = fnRef + "." + field.Name
 		s.EncodeField(1, field, f)
 	}
@@ -154,9 +192,15 @@ func (s *Struct) EncodeFunc(f io.Writer) error {
 }
 
 func (s *Struct) DecodeFunc(f io.Writer) error {
+	if s.Pos.IsValid() {
+		currentPos = s.Pos
+	}
 	fnRef := strings.ToLower(s.Name[0:1])
 	fmt.Fprintf(f, "func (%s *%s) UnmarshalEnkodo(dec *enkodo.Decoder) (err error) {\n", fnRef, s.Name)
 	for _, field := range s.Fields {
+		if field.Pos.IsValid() {
+			currentPos = field.Pos
+		}
 		field.Name = fnRef + "." + field.Name
 		s.DecodeField(1, field, f)
 	}
@@ -165,6 +209,9 @@ func (s *Struct) DecodeFunc(f io.Writer) error {
 }
 
 func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err error) {
+	if field.Pos.IsValid() {
+		currentPos = field.Pos
+	}
 	dent := strings.Repeat(ident, identCount)
 	name := field.Name
 	rawName := field.Name
@@ -202,7 +249,22 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 				val = fmt.Sprintf("%s(%s)", field.EncodeFunc, rawName)
 			}
 		}
-		fmt.Fprintf(f, "%senc.Encode(%s)\n", dent, val)
+		fmt.Fprintf(f, "%sif %s != nil {\n", dent, name)
+		fmt.Fprintf(f, "%s\tenc.Bool(true)\n", dent)
+		fmt.Fprintf(f, "%s\tenc.Encode(%s)\n", dent, val)
+		fmt.Fprintf(f, "%s} else {\n", dent)
+		fmt.Fprintf(f, "%s\tenc.Bool(false)\n", dent)
+		fmt.Fprintf(f, "%s}\n", dent)
+		return
+	}
+
+	// Handle maps (e.g. map[string]string)
+	if strings.HasPrefix(field.Type, "map[string]string") {
+		fmt.Fprintf(f, "%senc.Int(len(%s))\n", dent, name)
+		fmt.Fprintf(f, "%sfor k, v := range %s {\n", dent, name)
+		fmt.Fprintf(f, "%s\tenc.String(k)\n", dent)
+		fmt.Fprintf(f, "%s\tenc.String(v)\n", dent)
+		fmt.Fprintln(f, dent+"}")
 		return
 	}
 
@@ -210,10 +272,30 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 	if field.Type[0] == '[' {
 		fmt.Fprintf(f, "%senc.Int(len(%s))\n", dent, name)
 		fmt.Fprintf(f, "%sfor _, v := range %s {\n", dent, name)
-		if err := s.EncodeField(identCount+1, Field{Name: "v", Type: field.Type[2:], OverrideType: "", EncodeFunc: "", DecodeFunc: ""}, f); err != nil {
+		elemType := field.Type[2:]
+		vName := "v"
+		if unicode.IsUpper(rune(elemType[0])) {
+			vName = "&v"
+		}
+		if err := s.EncodeField(identCount+1, Field{Name: vName, Type: elemType, Pos: field.Pos}, f); err != nil {
 			return err
 		}
 		fmt.Fprintln(f, dent+"}")
+		return
+	}
+
+	// Handle struct implementing Encodee by pointer or value
+	lastDot := strings.LastIndex(field.Type, ".")
+	typeBase := field.Type
+	if lastDot >= 0 && lastDot+1 < len(field.Type) {
+		typeBase = field.Type[lastDot+1:]
+	}
+	if unicode.IsUpper(rune(typeBase[0])) {
+		if strings.HasPrefix(name, "&") {
+			fmt.Fprintf(f, "%senc.Encode(%s)\n", dent, name)
+		} else {
+			fmt.Fprintf(f, "%senc.Encode(&%s)\n", dent, name)
+		}
 		return
 	}
 
@@ -222,6 +304,9 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 }
 
 func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err error) {
+	if field.Pos.IsValid() {
+		currentPos = field.Pos
+	}
 	dent := strings.Repeat(ident, identCount)
 	name := field.Name
 	/*
@@ -300,9 +385,39 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 
 	// Handle pointers to other types
 	if field.Type[0] == '*' {
-		fmt.Fprintf(f, "%s%s = new(%s)\n", dent, name, strings.Trim(field.Type, "*"))
-		fmt.Fprintf(f, "%sif err = dec.Decode(%s); err != nil {\n", dent, name)
-		fmt.Fprintf(f, "%sreturn\n%s}\n", dent+ident, dent)
+		fmt.Fprintf(f, "%sif _hasVal, err := dec.Bool(); err != nil {\n", dent)
+		fmt.Fprintf(f, "%s\treturn err\n", dent)
+		fmt.Fprintf(f, "%s} else if _hasVal {\n", dent)
+		fmt.Fprintf(f, "%s\t%s = new(%s)\n", dent, name, strings.Trim(field.Type, "*"))
+		fmt.Fprintf(f, "%s\tif err = dec.Decode(%s); err != nil {\n", dent, name)
+		fmt.Fprintf(f, "%s\t\treturn err\n", dent)
+		fmt.Fprintf(f, "%s\t}\n", dent)
+		fmt.Fprintf(f, "%s}\n", dent)
+		return
+	}
+
+	// Handle maps (e.g. map[string]string)
+	if strings.HasPrefix(field.Type, "map[string]string") {
+		varMapLen := "_mapLen"
+		if _, ok := s._declared[varMapLen]; !ok {
+			s._declared[varMapLen] = "int"
+			fmt.Fprintf(f, "%svar %s int\n", dent, varMapLen)
+		}
+		fmt.Fprintf(f, "%sif %s, err = dec.Int(); err != nil {\n", dent, varMapLen)
+		fmt.Fprintf(f, "%s\treturn err\n", dent)
+		fmt.Fprintf(f, "%s}\n", dent)
+		fmt.Fprintf(f, "%s%s = make(map[string]string, %s)\n", dent, name, varMapLen)
+		fmt.Fprintf(f, "%sfor i := 0; i < %s; i++ {\n", dent, varMapLen)
+		fmt.Fprintf(f, "%s\tk, err := dec.String()\n", dent)
+		fmt.Fprintf(f, "%s\tif err != nil {\n", dent)
+		fmt.Fprintf(f, "%s\t\treturn err\n", dent)
+		fmt.Fprintf(f, "%s\t}\n", dent)
+		fmt.Fprintf(f, "%s\tv, err := dec.String()\n", dent)
+		fmt.Fprintf(f, "%s\tif err != nil {\n", dent)
+		fmt.Fprintf(f, "%s\t\treturn err\n", dent)
+		fmt.Fprintf(f, "%s\t}\n", dent)
+		fmt.Fprintf(f, "%s\t%s[k] = v\n", dent, name)
+		fmt.Fprintln(f, dent+"}")
 		return
 	}
 
@@ -316,7 +431,7 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 		// temp var for the type
 		init, temp := initType(field.Type)
 		// Read the len
-		s.DecodeField(identCount, Field{Name: "_arrLen", Type: "int", OverrideType: "", EncodeFunc: "", DecodeFunc: ""}, f)
+		s.DecodeField(identCount, Field{Name: "_arrLen", Type: "int", Pos: field.Pos}, f)
 		// Make the buffer
 		fmt.Fprintf(f, "%s%s = make(%s, 0, _arrLen)\n", dent, name, field.Type)
 		fmt.Fprintf(f, "%sfor i := 0; i < _arrLen; i++ {\n", dent)
@@ -324,12 +439,26 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 
 		// This initType makes a var per type in a loop, its technically not needed as we
 		// could use a temp var, but
-		if err := s.DecodeField(identCount+1, Field{Name: temp, Type: field.Type[2:], OverrideType: "", EncodeFunc: "", DecodeFunc: ""}, f); err != nil {
+		if err := s.DecodeField(identCount+1, Field{Name: temp, Type: field.Type[2:], Pos: field.Pos}, f); err != nil {
 			return err
 		}
 		fmt.Fprintf(f, "%s%s = append(%s, %s)\n", dent+ident, name, name, temp)
 		fmt.Fprintln(f, dent+"}")
+		return
 	}
+
+	// Handle struct implementing Decodee by pointer
+	lastDot := strings.LastIndex(field.Type, ".")
+	typeBase := field.Type
+	if lastDot >= 0 && lastDot+1 < len(field.Type) {
+		typeBase = field.Type[lastDot+1:]
+	}
+	if unicode.IsUpper(rune(typeBase[0])) {
+		fmt.Fprintf(f, "%sif err = dec.Decode(&%s); err != nil {\n", dent, name)
+		fmt.Fprintf(f, "%sreturn\n%s}\n", dent+ident, dent)
+		return
+	}
+
 	return nil
 }
 
@@ -351,21 +480,29 @@ func initType(typ string) (init string, name string) {
 }
 
 func GetFieldType(f ast.Expr) (result string) {
+	if f != nil && f.Pos().IsValid() {
+		currentPos = f.Pos()
+	}
 	switch t := f.(type) {
 	case *ast.Ident:
 		// basic types (e.g. Int)
 		result = t.Name
 	case *ast.StarExpr:
 		// pointer types
-		if v, ok := t.X.(*ast.Ident); !ok {
-			return
-		} else {
-			result = "*" + v.Name
+		inner := GetFieldType(t.X)
+		if inner != "" {
+			result = "*" + inner
 		}
 	case *ast.ArrayType:
 		result = "[]" + GetFieldType(t.Elt)
+	case *ast.MapType:
+		result = "map[" + GetFieldType(t.Key) + "]" + GetFieldType(t.Value)
 	case *ast.SelectorExpr:
-		result = t.Sel.Name
+		if xIdent, ok := t.X.(*ast.Ident); ok {
+			result = xIdent.Name + "." + t.Sel.Name
+		} else {
+			result = t.Sel.Name
+		}
 	default:
 		// uncomment below to error and see new types
 		// result = f.(*ast.Ident).Name
@@ -378,10 +515,16 @@ func GetStructFields(obj *ast.Object) *Struct {
 	if obj.Decl == nil {
 		return nil
 	}
+	if node, ok := obj.Decl.(ast.Node); ok && node.Pos().IsValid() {
+		currentPos = node.Pos()
+	}
 
 	ts, ok := obj.Decl.(*ast.TypeSpec)
 	if !ok {
 		return nil // not a type definition
+	}
+	if ts.Pos().IsValid() {
+		currentPos = ts.Pos()
 	}
 	st, ok := ts.Type.(*ast.StructType)
 	if !ok {
@@ -391,12 +534,17 @@ func GetStructFields(obj *ast.Object) *Struct {
 	s := &Struct{
 		Name:   ts.Name.Name,
 		Fields: make([]Field, 0),
+		Pos:    ts.Pos(),
 	}
 
 	for _, field := range st.Fields.List {
+		if field.Pos().IsValid() {
+			currentPos = field.Pos()
+		}
 		f := Field{
 			Name: field.Names[0].Name,
 			Type: GetFieldType(field.Type),
+			Pos:  field.Pos(),
 		}
 		// Override the type with anything in a struct tag. E.g. enkodo:"int"
 		// skip fields that dont have the enkodo tag
@@ -431,8 +579,39 @@ func GetStructFields(obj *ast.Object) *Struct {
 	}
 	return nil
 }
-func objectsInFile(file string) error {
+func objectsInFile(file string) (err error) {
+	currentFile = file
+	currentPos = token.NoPos
+	currentFset = nil
+
+	var createdFile string
+	defer func() {
+		if r := recover(); r != nil {
+			if createdFile != "" {
+				_ = os.Remove(createdFile)
+			}
+			filename := file
+			line := 0
+			if currentFset != nil && currentPos.IsValid() {
+				pos := currentFset.Position(currentPos)
+				if pos.Filename != "" {
+					filename = pos.Filename
+				}
+				line = pos.Line
+			}
+			if line > 0 {
+				fmt.Fprintf(os.Stderr, "%s:%d: panic: %v\n", filename, line, r)
+				err = fmt.Errorf("%s:%d: panic: %v", filename, line, r)
+			} else {
+				fmt.Fprintf(os.Stderr, "%s: panic: %v\n", filename, r)
+				err = fmt.Errorf("%s: panic: %v", filename, r)
+			}
+			exitFunc(1)
+		}
+	}()
+
 	fset := token.NewFileSet()
+	currentFset = fset
 	fil, err := parser.ParseFile(fset, file, nil, 0)
 	if err != nil {
 		log.Fatalf("failed to parse %s: %s", file, err)
@@ -444,6 +623,9 @@ func objectsInFile(file string) error {
 	for _, obj := range fil.Scope.Objects {
 		if obj.Decl == nil {
 			continue
+		}
+		if node, ok := obj.Decl.(ast.Node); ok && node.Pos().IsValid() {
+			currentPos = node.Pos()
 		}
 
 		s := GetStructFields(obj)
@@ -467,6 +649,7 @@ func objectsInFile(file string) error {
 		if err != nil {
 			return err
 		}
+		createdFile = filename
 		defer oFile.Close()
 		out = oFile
 	}
@@ -475,9 +658,30 @@ func objectsInFile(file string) error {
 	imports := map[string]interface{}{
 		packageName: true,
 	}
+
+	// Map of package aliases/names to import path from the source file
+	sourceImports := make(map[string]string)
+	for _, imp := range fil.Imports {
+		if imp.Pos().IsValid() {
+			currentPos = imp.Pos()
+		}
+		path := strings.Trim(imp.Path.Value, `"`)
+		name := filepath.Base(path)
+		if imp.Name != nil && imp.Name.Name != "" {
+			name = imp.Name.Name
+		}
+		sourceImports[name] = path
+	}
+
 	// Check all the types that we will convert and see if they need to import anything
 	for _, struc := range structs {
+		if struc.Pos.IsValid() {
+			currentPos = struc.Pos
+		}
 		for _, field := range struc.Fields {
+			if field.Pos.IsValid() {
+				currentPos = field.Pos
+			}
 			ty := field.Type
 			if field.OverrideType != "" {
 				ty = field.OverrideType
@@ -485,6 +689,15 @@ func objectsInFile(file string) error {
 			if conv, ok := enc_types_advanced[ty]; ok {
 				for _, impt := range conv.Imports() {
 					imports[impt] = true
+				}
+			}
+			// Check if type references an imported package (e.g. command.Command, db.FileEntry)
+			cleanTy := strings.TrimPrefix(ty, "[]")
+			cleanTy = strings.TrimPrefix(cleanTy, "*")
+			if dot := strings.Index(cleanTy, "."); dot > 0 {
+				pkgPrefix := cleanTy[:dot]
+				if impPath, exists := sourceImports[pkgPrefix]; exists {
+					imports[impPath] = true
 				}
 			}
 		}
@@ -498,6 +711,9 @@ func objectsInFile(file string) error {
 	fmt.Fprintln(out, "")
 
 	for _, st := range structs {
+		if st.Pos.IsValid() {
+			currentPos = st.Pos
+		}
 		st.EncodeFunc(out)
 		st.DecodeFunc(out)
 	}
@@ -539,7 +755,7 @@ func main() {
 	files := make([]string, 0, 10)
 
 	filepath.WalkDir(opath, func(path string, d fs.DirEntry, err error) error {
-		if !d.IsDir() {
+		if !d.IsDir() && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_enkodo.go") && !strings.HasSuffix(path, "_test.go") {
 			files = append(files, path)
 		}
 		return nil
@@ -549,6 +765,8 @@ func main() {
 		log.Fatal("No input files given")
 	}
 	for _, file := range files {
-		objectsInFile(file)
+		if err := objectsInFile(file); err != nil {
+			exitFunc(1)
+		}
 	}
 }
