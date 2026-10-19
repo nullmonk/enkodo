@@ -787,12 +787,18 @@ func main() {
 
 	files := make([]string, 0, 10)
 
-	filepath.WalkDir(opath, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(opath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		if !d.IsDir() && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_enkodo.go") && !strings.HasSuffix(path, "_test.go") {
 			files = append(files, path)
 		}
 		return nil
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if len(files) == 0 {
 		log.Fatal("No input files given")

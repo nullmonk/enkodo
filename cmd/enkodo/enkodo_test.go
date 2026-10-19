@@ -200,3 +200,23 @@ type CrashingStruct struct {
 		t.Errorf("expected stderr to contain 'panic:', got:\n%s", out)
 	}
 }
+
+func TestCLINonExistentPath(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "non_existent_directory_for_test")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected command to exit with error, got success")
+	}
+
+	out := stderr.String()
+	if strings.Contains(out, "panic:") {
+		t.Errorf("expected clean exit on non-existent path, got panic:\n%s", out)
+	}
+	if !strings.Contains(out, "no such file or directory") {
+		t.Errorf("expected error about no such file or directory, got:\n%s", out)
+	}
+}
+
