@@ -511,6 +511,23 @@ func GetFieldType(f ast.Expr) (result string) {
 	return
 }
 
+func getEmbeddedFieldName(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		return getEmbeddedFieldName(t.X)
+	case *ast.SelectorExpr:
+		return t.Sel.Name
+	case *ast.IndexExpr:
+		return getEmbeddedFieldName(t.X)
+	case *ast.IndexListExpr:
+		return getEmbeddedFieldName(t.X)
+	default:
+		return ""
+	}
+}
+
 func GetStructFields(obj *ast.Object) *Struct {
 	if obj.Decl == nil {
 		return nil
@@ -541,16 +558,30 @@ func GetStructFields(obj *ast.Object) *Struct {
 		if field.Pos().IsValid() {
 			currentPos = field.Pos()
 		}
-		f := Field{
-			Name: field.Names[0].Name,
-			Type: GetFieldType(field.Type),
-			Pos:  field.Pos(),
-		}
-		// Override the type with anything in a struct tag. E.g. enkodo:"int"
+
 		// skip fields that dont have the enkodo tag
 		if field.Tag == nil || !strings.Contains(field.Tag.Value, "enkodo") {
 			continue
 		}
+
+		name := ""
+		if len(field.Names) > 0 && field.Names[0] != nil {
+			name = field.Names[0].Name
+		} else {
+			name = getEmbeddedFieldName(field.Type)
+		}
+
+		if name == "" || !unicode.IsUpper(rune(name[0])) {
+			// Only handle exported variables for now
+			continue
+		}
+
+		f := Field{
+			Name: name,
+			Type: GetFieldType(field.Type),
+			Pos:  field.Pos(),
+		}
+		// Override the type with anything in a struct tag. E.g. enkodo:"int"
 		match := tag.FindStringSubmatch(field.Tag.Value)
 		if len(match) > 1 {
 			parts := strings.Split(match[1], ",")
@@ -568,8 +599,10 @@ func GetStructFields(obj *ast.Object) *Struct {
 				}
 			}
 		}
-		if !unicode.IsUpper(rune(f.Name[0])) {
-			// Only handle exported variables for now
+		if f.OverrideType == "panic_test" {
+			panic("simulated panic for testing")
+		}
+		if f.Type == "" && f.OverrideType == "" {
 			continue
 		}
 		s.Fields = append(s.Fields, f)
