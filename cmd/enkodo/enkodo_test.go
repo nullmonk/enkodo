@@ -220,3 +220,118 @@ func TestCLINonExistentPath(t *testing.T) {
 	}
 }
 
+func TestByteTypeAndOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "bytetest.go")
+	content := `package bytetest
+
+type ConnectionType byte
+
+type ClientAuditRecord struct {
+	RawByte byte           ` + "`enkodo:\"\"`" + `
+	Type    ConnectionType ` + "`enkodo:\"byte\"`" + `
+}
+`
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	if err := objectsInFile(testFile); err != nil {
+		t.Fatalf("objectsInFile failed: %v", err)
+	}
+
+	genFile := filepath.Join(tmpDir, "bytetest_enkodo.go")
+	genBytes, err := os.ReadFile(genFile)
+	if err != nil {
+		t.Fatalf("failed to read generated file: %v", err)
+	}
+
+	genStr := string(genBytes)
+	if !strings.Contains(genStr, "enc.Uint8(c.RawByte)") {
+		t.Errorf("expected enc.Uint8(c.RawByte), got:\n%s", genStr)
+	}
+	if !strings.Contains(genStr, "enc.Uint8(byte(c.Type))") {
+		t.Errorf("expected enc.Uint8(byte(c.Type)), got:\n%s", genStr)
+	}
+	if !strings.Contains(genStr, "c.Type = ConnectionType(v)") {
+		t.Errorf("expected c.Type = ConnectionType(v), got:\n%s", genStr)
+	}
+}
+
+func TestAutoDetectSimpleType(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "simpletype.go")
+	content := `package simpletypetest
+
+type ConnectionType uint8
+type MyType byte
+
+type AuditRecord struct {
+	Type    ConnectionType  ` + "`enkodo:\"\"`" + `
+	PtrType *ConnectionType ` + "`enkodo:\"\"`" + `
+	M       MyType          ` + "`enkodo:\"\"`" + `
+	F       *MyType         ` + "`enkodo:\"\"`" + `
+}
+`
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	if err := objectsInFile(testFile); err != nil {
+		t.Fatalf("objectsInFile failed: %v", err)
+	}
+
+	genFile := filepath.Join(tmpDir, "simpletype_enkodo.go")
+	genBytes, err := os.ReadFile(genFile)
+	if err != nil {
+		t.Fatalf("failed to read generated file: %v", err)
+	}
+
+	genStr := string(genBytes)
+
+	// Check Value ConnectionType (uint8)
+	if !strings.Contains(genStr, "enc.Uint8(uint8(a.Type))") {
+		t.Errorf("expected enc.Uint8(uint8(a.Type)), got:\n%s", genStr)
+	}
+	if !strings.Contains(genStr, "a.Type = ConnectionType(v)") {
+		t.Errorf("expected a.Type = ConnectionType(v), got:\n%s", genStr)
+	}
+
+	// Check Pointer *ConnectionType
+	if !strings.Contains(genStr, "enc.Uint8(uint8(*a.PtrType))") {
+		t.Errorf("expected enc.Uint8(uint8(*a.PtrType)), got:\n%s", genStr)
+	}
+	if !strings.Contains(genStr, "tmp := ConnectionType(v)") {
+		t.Errorf("expected tmp := ConnectionType(v), got:\n%s", genStr)
+	}
+	if !strings.Contains(genStr, "a.PtrType = &tmp") {
+		t.Errorf("expected a.PtrType = &tmp, got:\n%s", genStr)
+	}
+
+	// Check Value MyType (byte)
+	if !strings.Contains(genStr, "enc.Uint8(byte(a.M))") {
+		t.Errorf("expected enc.Uint8(byte(a.M)), got:\n%s", genStr)
+	}
+	if !strings.Contains(genStr, "a.M = MyType(v)") {
+		t.Errorf("expected a.M = MyType(v), got:\n%s", genStr)
+	}
+
+	// Check Pointer *MyType
+	if !strings.Contains(genStr, "enc.Uint8(byte(*a.F))") {
+		t.Errorf("expected enc.Uint8(byte(*a.F)), got:\n%s", genStr)
+	}
+	if !strings.Contains(genStr, "tmp := MyType(v)") {
+		t.Errorf("expected tmp := MyType(v), got:\n%s", genStr)
+	}
+	if !strings.Contains(genStr, "a.F = &tmp") {
+		t.Errorf("expected a.F = &tmp, got:\n%s", genStr)
+	}
+
+	// Ensure no enc.Encode on simple types
+	if strings.Contains(genStr, "enc.Encode(&a.Type)") || strings.Contains(genStr, "enc.Encode(a.PtrType)") {
+		t.Errorf("should not call enc.Encode on simple types, got:\n%s", genStr)
+	}
+}
+
+
+

@@ -32,6 +32,7 @@ var (
 var enc_types_advanced = map[string]TypeConverter{
 	"uint":    NewBasicTypeConverter("uint", "Uint"),
 	"uint8":   NewBasicTypeConverter("uint8", "Uint8"),
+	"byte":    NewBasicTypeConverter("byte", "Uint8"),
 	"uint16":  NewBasicTypeConverter("uint16", "Uint16"),
 	"uint32":  NewBasicTypeConverter("uint32", "Uint32"),
 	"uint64":  NewBasicTypeConverter("uint64", "Uint64"),
@@ -167,6 +168,7 @@ type Struct struct {
 
 	_declared   map[string]string
 	_hasLoopVar bool
+	simpleTypes map[string]string
 }
 
 func (s *Struct) String() string {
@@ -215,6 +217,11 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 	dent := strings.Repeat(ident, identCount)
 	name := field.Name
 	rawName := field.Name
+	if field.Type != "" && field.Type[0] != '*' && field.OverrideType == "" && s.simpleTypes != nil {
+		if underlying, ok := s.simpleTypes[field.Type]; ok {
+			field.OverrideType = underlying
+		}
+	}
 	if field.OverrideType != "" {
 		name = fmt.Sprintf("%s(%s)", field.OverrideType, field.Name)
 		field.Type = field.OverrideType
@@ -241,6 +248,30 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 
 	// Handle pointers to other types
 	if field.Type[0] == '*' {
+		elemType := field.Type[1:]
+		if conv, ok := enc_types_advanced[elemType]; ok {
+			fmt.Fprintf(f, "%sif %s != nil {\n", dent, name)
+			fmt.Fprintf(f, "%s\tenc.Bool(true)\n", dent)
+			fmt.Fprintf(f, "%s\tenc.%s(*%s)\n", dent, conv.EnkodoFunction(), name)
+			fmt.Fprintf(f, "%s} else {\n", dent)
+			fmt.Fprintf(f, "%s\tenc.Bool(false)\n", dent)
+			fmt.Fprintf(f, "%s}\n", dent)
+			return
+		}
+		if s.simpleTypes != nil {
+			if underlying, ok := s.simpleTypes[elemType]; ok {
+				if conv, ok := enc_types_advanced[underlying]; ok {
+					fmt.Fprintf(f, "%sif %s != nil {\n", dent, name)
+					fmt.Fprintf(f, "%s\tenc.Bool(true)\n", dent)
+					fmt.Fprintf(f, "%s\tenc.%s(%s(*%s))\n", dent, conv.EnkodoFunction(), underlying, name)
+					fmt.Fprintf(f, "%s} else {\n", dent)
+					fmt.Fprintf(f, "%s\tenc.Bool(false)\n", dent)
+					fmt.Fprintf(f, "%s}\n", dent)
+					return
+				}
+			}
+		}
+
 		val := name
 		if field.EncodeFunc != "" {
 			if strings.HasPrefix(field.EncodeFunc, ".") {
@@ -274,7 +305,15 @@ func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err erro
 		fmt.Fprintf(f, "%sfor _, v := range %s {\n", dent, name)
 		elemType := field.Type[2:]
 		vName := "v"
-		if unicode.IsUpper(rune(elemType[0])) {
+		isSimple := false
+		if _, ok := enc_types_advanced[elemType]; ok {
+			isSimple = true
+		} else if s.simpleTypes != nil {
+			if _, ok := s.simpleTypes[elemType]; ok {
+				isSimple = true
+			}
+		}
+		if !isSimple && unicode.IsUpper(rune(elemType[0])) {
 			vName = "&v"
 		}
 		if err := s.EncodeField(identCount+1, Field{Name: vName, Type: elemType, Pos: field.Pos}, f); err != nil {
@@ -329,6 +368,11 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 	}
 
 	// These basic functions are all error wrapped
+	if field.Type != "" && field.Type[0] != '*' && field.OverrideType == "" && s.simpleTypes != nil {
+		if underlying, ok := s.simpleTypes[field.Type]; ok {
+			field.OverrideType = underlying
+		}
+	}
 	typ := field.Type
 	if field.OverrideType != "" {
 		typ = field.OverrideType
@@ -385,6 +429,37 @@ func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err erro
 
 	// Handle pointers to other types
 	if field.Type[0] == '*' {
+		elemType := strings.TrimPrefix(field.Type, "*")
+		if conv, ok := enc_types_advanced[elemType]; ok {
+			fmt.Fprintf(f, "%sif _hasVal, err := dec.Bool(); err != nil {\n", dent)
+			fmt.Fprintf(f, "%s\treturn err\n", dent)
+			fmt.Fprintf(f, "%s} else if _hasVal {\n", dent)
+			fmt.Fprintf(f, "%s\tif v, err := dec.%s(); err == nil {\n", dent, conv.EnkodoFunction())
+			fmt.Fprintf(f, "%s\t\t%s = &v\n", dent, name)
+			fmt.Fprintf(f, "%s\t} else {\n", dent)
+			fmt.Fprintf(f, "%s\t\treturn err\n", dent)
+			fmt.Fprintf(f, "%s\t}\n", dent)
+			fmt.Fprintf(f, "%s}\n", dent)
+			return
+		}
+		if s.simpleTypes != nil {
+			if underlying, ok := s.simpleTypes[elemType]; ok {
+				if conv, ok := enc_types_advanced[underlying]; ok {
+					fmt.Fprintf(f, "%sif _hasVal, err := dec.Bool(); err != nil {\n", dent)
+					fmt.Fprintf(f, "%s\treturn err\n", dent)
+					fmt.Fprintf(f, "%s} else if _hasVal {\n", dent)
+					fmt.Fprintf(f, "%s\tif v, err := dec.%s(); err == nil {\n", dent, conv.EnkodoFunction())
+					fmt.Fprintf(f, "%s\t\ttmp := %s(v)\n", dent, elemType)
+					fmt.Fprintf(f, "%s\t\t%s = &tmp\n", dent, name)
+					fmt.Fprintf(f, "%s\t} else {\n", dent)
+					fmt.Fprintf(f, "%s\t\treturn err\n", dent)
+					fmt.Fprintf(f, "%s\t}\n", dent)
+					fmt.Fprintf(f, "%s}\n", dent)
+					return
+				}
+			}
+		}
+
 		fmt.Fprintf(f, "%sif _hasVal, err := dec.Bool(); err != nil {\n", dent)
 		fmt.Fprintf(f, "%s\treturn err\n", dent)
 		fmt.Fprintf(f, "%s} else if _hasVal {\n", dent)
@@ -612,6 +687,72 @@ func GetStructFields(obj *ast.Object) *Struct {
 	}
 	return nil
 }
+
+func collectTypesFromAST(fil *ast.File, rawTypes map[string]string) {
+	for _, decl := range fil.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range genDecl.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			underlying := GetFieldType(typeSpec.Type)
+			if underlying != "" {
+				rawTypes[typeSpec.Name.Name] = underlying
+			}
+		}
+	}
+}
+
+func getPackageSimpleTypes(fset *token.FileSet, file string, fil *ast.File) map[string]string {
+	rawTypes := make(map[string]string)
+	collectTypesFromAST(fil, rawTypes)
+
+	dir := filepath.Dir(file)
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_enkodo.go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			otherPath := filepath.Join(dir, name)
+			if otherPath == file {
+				continue
+			}
+			otherFil, err := parser.ParseFile(fset, otherPath, nil, 0)
+			if err != nil || otherFil.Name == nil || otherFil.Name.Name != fil.Name.Name {
+				continue
+			}
+			collectTypesFromAST(otherFil, rawTypes)
+		}
+	}
+
+	simpleTypes := make(map[string]string)
+	for name, underlying := range rawTypes {
+		visited := map[string]bool{name: true}
+		cur := underlying
+		for {
+			if _, ok := enc_types_advanced[cur]; ok {
+				simpleTypes[name] = cur
+				break
+			}
+			next, exists := rawTypes[cur]
+			if !exists || visited[next] {
+				break
+			}
+			visited[next] = true
+			cur = next
+		}
+	}
+	return simpleTypes
+}
+
 func objectsInFile(file string) (err error) {
 	currentFile = file
 	currentPos = token.NoPos
@@ -652,6 +793,8 @@ func objectsInFile(file string) (err error) {
 
 	pkg := fil.Name.Name // package name
 
+	simpleTypes := getPackageSimpleTypes(fset, file, fil)
+
 	structs := make([]*Struct, 0)
 	for _, obj := range fil.Scope.Objects {
 		if obj.Decl == nil {
@@ -665,6 +808,7 @@ func objectsInFile(file string) (err error) {
 		if s == nil {
 			continue
 		}
+		s.simpleTypes = simpleTypes
 		structs = append(structs, s)
 	}
 
