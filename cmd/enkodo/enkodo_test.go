@@ -333,5 +333,37 @@ type AuditRecord struct {
 	}
 }
 
+func TestUnusedSourceImportNotGenerated(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "imported.go")
+	content := `package testimportpkg
+
+import "sync"
+
+type Item struct {
+	Lock sync.Mutex ` + "`enkodo:\"\"`" + `
+}
+`
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	if err := objectsInFile(testFile); err != nil {
+		t.Fatalf("objectsInFile failed: %v", err)
+	}
+
+	genFile := filepath.Join(tmpDir, "imported_enkodo.go")
+	genBytes, err := os.ReadFile(genFile)
+	if err != nil {
+		t.Fatalf("failed to read generated file: %v", err)
+	}
+
+	genStr := string(genBytes)
+	if strings.Contains(genStr, `"sync"`) {
+		t.Errorf("did not expect sync import when not referenced in generated code, got:\n%s", genStr)
+	}
+}
+
+
 
 
